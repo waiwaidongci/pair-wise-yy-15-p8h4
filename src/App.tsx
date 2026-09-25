@@ -1,126 +1,103 @@
+import { useEffect, useMemo, useReducer, useState } from "react";
 import "./styles.css";
-
-const project = {
-  "sourceNo": 9,
-  "id": "hxyfront-62014",
-  "port": 62014,
-  "title": "赛鸽训放记录",
-  "domain": "赛鸽训放",
-  "prompt": "我想做一个面向赛鸽棚的训放记录前端工具，鸽主可以记录足环号、血统、训放地点、放飞距离、天气、归巢时间、飞行速度、健康状态和配对记录。页面需要有鸽棚总览、训放成绩排行、未归巢提醒、单羽赛鸽档案和按血统筛选的历史成绩。",
-  "palette": [
-    "#1d4ed8",
-    "#64748b",
-    "#f97316"
-  ],
-  "metrics": [
-    "归巢率",
-    "平均速度",
-    "未归巢",
-    "血统档案"
-  ],
-  "filters": [
-    "短距离",
-    "中距离",
-    "长距离",
-    "种鸽"
-  ],
-  "fields": [
-    "足环号",
-    "血统",
-    "训放地点",
-    "放飞距离",
-    "归巢时间",
-    "健康状态"
-  ],
-  "records": [
-    [
-      "CHN-24-001839",
-      "詹森系",
-      "80km，晴",
-      "均速1180m/min"
-    ],
-    [
-      "CHN-24-002114",
-      "凡龙系",
-      "120km，侧风",
-      "归巢延迟"
-    ],
-    [
-      "CHN-23-008771",
-      "种鸽",
-      "配对记录更新",
-      "健康正常"
-    ]
-  ]
-};
+import type { EditReply } from "./lib/types";
+import { missingFields } from "./lib/types";
+import type { EditableField } from "./lib/types";
+import { applyFieldEdit, bloodlineStats, computeRanking, overviewStats } from "./lib/merge";
+import { loadState, mergeReducer, saveState } from "./lib/store";
+import { Overview } from "./components/Overview";
+import { MergeConsole } from "./components/MergeConsole";
+import { RankingBoard } from "./components/RankingBoard";
+import { PendingList } from "./components/PendingList";
+import { AuditLog } from "./components/AuditLog";
+import { BloodlinePanel } from "./components/BloodlinePanel";
+import { PigeonProfile } from "./components/PigeonProfile";
 
 function App() {
+  const [state, dispatch] = useReducer(mergeReducer, { records: [], audit: [] }, loadState);
+  useEffect(() => saveState(state), [state]);
+
+  // 总览、排行、待补、未归巢、血统档案全部从当前记录推导
+  const ranking = useMemo(() => computeRanking(state.records), [state.records]);
+  const stats = useMemo(() => overviewStats(state.records), [state.records]);
+  const bloodlines = useMemo(() => bloodlineStats(state.records), [state.records]);
+  const pending = useMemo(
+    () =>
+      state.records
+        .filter((r) => missingFields(r).length > 0)
+        .sort((a, b) => b.releaseAt.localeCompare(a.releaseAt)),
+    [state.records]
+  );
+  const unreturned = useMemo(() => state.records.filter((r) => r.arrivalAt === null), [state.records]);
+
+  const [bloodFilter, setBloodFilter] = useState<string | null>(null);
+  const [selectedRing, setSelectedRing] = useState<string | null>(null);
+
+  // 改动距离/天气/报时：先在合并层试算（校验 + 前后对照），通过后再派发
+  const tryEdit = (id: string, field: EditableField, value: string): EditReply => {
+    const outcome = applyFieldEdit(state.records, id, field, value);
+    if (outcome.error) return { error: outcome.error, changed: false };
+    dispatch({ type: "edit", id, field, value });
+    return { error: null, changed: outcome.audit !== null };
+  };
+
   return (
     <main className="app">
       <section className="hero">
-        <p>{project.id} · 源提示词{project.sourceNo} · Port {project.port}</p>
-        <h1>{project.title}</h1>
-        <span>{project.prompt}</span>
+        <p>hxyfront-62014 · 源提示词9 · Port 62014</p>
+        <h1>赛鸽训放记录 · 日志合并台</h1>
+        <span>
+          鸽棚导出的训放表格式不一，粘贴后先解析预览：按「足环号 + 放飞时刻」找出重复（重复行沿用首次来源），
+          缺距离、天气或归巢时刻的记录留在待补区、不进排行；确认后写入有效行。之后改动距离、天气或报时会自动重算排行
+          并留下前后对照，总览、未归巢数量与血统档案始终跟随当前结果。
+        </span>
       </section>
 
-      <section className="metrics">
-        {project.metrics.map((metric: string, index: number) => (
-          <article key={metric}>
-            <small>{metric}</small>
-            <strong>{[28, 6, 14, 91][index] ?? 10}</strong>
-          </article>
-        ))}
-      </section>
+      <Overview stats={stats} unreturned={unreturned} />
 
-      <section className="workspace">
-        <aside className="panel">
-          <h2>{project.domain}分类</h2>
-          <div className="chips">
-            {project.filters.map((item: string) => (
-              <button key={item}>{item}</button>
-            ))}
-          </div>
-        </aside>
+      <MergeConsole
+        existing={state.records}
+        onConfirm={(rows, source) => dispatch({ type: "confirm", rows, source })}
+      />
 
-        <section className="panel form-panel">
-          <div className="heading">
-            <div>
-              <p>专业字段</p>
-              <h2>新增记录</h2>
-            </div>
-            <button className="primary">保存记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
-      </section>
-
-      <section className="panel">
-        <div className="heading">
-          <div>
-            <p>近期记录</p>
-            <h2>工作台摘要</h2>
-          </div>
-          <button>导出CSV</button>
+      <div className="board-grid">
+        <RankingBoard
+          ranking={ranking}
+          bloodFilter={bloodFilter}
+          onClearBlood={() => setBloodFilter(null)}
+          onSelectRing={setSelectedRing}
+          onEdit={tryEdit}
+        />
+        <div className="stack">
+          <PendingList
+            records={pending}
+            onEdit={tryEdit}
+            onRemove={(id) => dispatch({ type: "remove", id })}
+            onSelectRing={setSelectedRing}
+          />
+          <AuditLog entries={state.audit} />
         </div>
-        <div className="records">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")}>
-              <b>{String(index + 1).padStart(2, "0")}</b>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
+      </div>
+
+      <div className="two-col">
+        <BloodlinePanel stats={bloodlines} active={bloodFilter} onSelect={setBloodFilter} />
+        <PigeonProfile
+          ring={selectedRing}
+          records={state.records}
+          ranking={ranking}
+          onClose={() => setSelectedRing(null)}
+        />
+      </div>
+
+      <footer className="footer">
+        <button
+          onClick={() => {
+            if (window.confirm("恢复示例数据并清空修改记录？")) dispatch({ type: "reset" });
+          }}
+        >
+          恢复示例数据
+        </button>
+      </footer>
     </main>
   );
 }
