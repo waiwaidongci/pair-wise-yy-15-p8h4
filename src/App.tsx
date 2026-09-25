@@ -1,126 +1,163 @@
+import { useEffect, useMemo, useState } from "react";
 import "./styles.css";
+import type { LoftState, MergePlan } from "./lib/types";
+import { SEED_RECORDS } from "./lib/sample";
+import {
+  applyEdit,
+  applyMerge,
+  bloodlineStats,
+  completePending,
+  computeRanking,
+  markUnreturned,
+  overviewStats,
+  planMerge,
+  removePending,
+  type FieldPatch,
+} from "./lib/merge";
+import { parseTable } from "./lib/parse";
+import OverviewBar from "./components/OverviewBar";
+import MergeConsole from "./components/MergeConsole";
+import RankingBoard from "./components/RankingBoard";
+import PendingList from "./components/PendingList";
+import UnreturnedPanel from "./components/UnreturnedPanel";
+import BloodlinePanel from "./components/BloodlinePanel";
+import AuditTrail from "./components/AuditTrail";
 
-const project = {
-  "sourceNo": 9,
-  "id": "hxyfront-62014",
-  "port": 62014,
-  "title": "赛鸽训放记录",
-  "domain": "赛鸽训放",
-  "prompt": "我想做一个面向赛鸽棚的训放记录前端工具，鸽主可以记录足环号、血统、训放地点、放飞距离、天气、归巢时间、飞行速度、健康状态和配对记录。页面需要有鸽棚总览、训放成绩排行、未归巢提醒、单羽赛鸽档案和按血统筛选的历史成绩。",
-  "palette": [
-    "#1d4ed8",
-    "#64748b",
-    "#f97316"
-  ],
-  "metrics": [
-    "归巢率",
-    "平均速度",
-    "未归巢",
-    "血统档案"
-  ],
-  "filters": [
-    "短距离",
-    "中距离",
-    "长距离",
-    "种鸽"
-  ],
-  "fields": [
-    "足环号",
-    "血统",
-    "训放地点",
-    "放飞距离",
-    "归巢时间",
-    "健康状态"
-  ],
-  "records": [
-    [
-      "CHN-24-001839",
-      "詹森系",
-      "80km，晴",
-      "均速1180m/min"
-    ],
-    [
-      "CHN-24-002114",
-      "凡龙系",
-      "120km，侧风",
-      "归巢延迟"
-    ],
-    [
-      "CHN-23-008771",
-      "种鸽",
-      "配对记录更新",
-      "健康正常"
-    ]
-  ]
-};
+const project = { sourceNo: 9, id: "hxyfront-62014", port: 62014, title: "赛鸽训放记录" };
+
+const STORAGE_KEY = "hxyfront-62014-loft-v1";
+
+const seedState: LoftState = { records: SEED_RECORDS, pending: [], edits: [] };
+
+function loadState(): LoftState {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as LoftState;
+      if (Array.isArray(parsed.records) && Array.isArray(parsed.pending) && Array.isArray(parsed.edits)) {
+        return parsed;
+      }
+    }
+  } catch {
+    /* 缓存损坏时回退到示例数据 */
+  }
+  return seedState;
+}
 
 function App() {
+  const [state, setState] = useState<LoftState>(loadState);
+  const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }, [state]);
+
+  // 总览 / 排行 / 血统档案全部跟着当前记录推导
+  const ranking = useMemo(() => computeRanking(state.records), [state.records]);
+  const stats = useMemo(() => overviewStats(state.records), [state.records]);
+  const bloodlines = useMemo(() => bloodlineStats(state.records), [state.records]);
+
+  // —— 界面动作层：只编排 解析(parse) / 合并(merge) 纯函数并落状态 ——
+
+  const handlePreview = (text: string, defaultDate: string, source: string) => {
+    const result = parseTable(text, { defaultDate });
+    if (result.rows.length === 0) {
+      return { plan: null, message: "没有解析到数据行" };
+    }
+    const plan = planMerge(state.records, state.pending, result.rows, source);
+    const message = `识别 ${result.rows.length} 行 · ${result.headerFound ? "检测到表头" : "无表头，按内容推断列"} · 分隔符：${result.delimiter}`;
+    return { plan, message };
+  };
+
+  const handleConfirm = (plan: MergePlan) => {
+    const { state: next, summary } = applyMerge(state, plan);
+    setState(next);
+    setNotice(summary);
+  };
+
+  const handleEdit = (recordId: string, patch: FieldPatch): string | null => {
+    const res = applyEdit(state, recordId, patch);
+    if (!res.ok) return res.error;
+    setState(res.state);
+    setNotice(`已更新 ${res.ring} 并重算排行，前后值见修订记录`);
+    return null;
+  };
+
+  const handleCompletePending = (id: string, patch: FieldPatch) => {
+    const res = completePending(state, id, patch);
+    setState(res.state);
+    setNotice(res.result);
+  };
+
+  const handleMarkUnreturned = (id: string) => {
+    const res = markUnreturned(state, id);
+    setState(res.state);
+    setNotice(res.result);
+  };
+
+  const handleRemovePending = (id: string) => {
+    setState(removePending(state, id));
+    setNotice("已移出待补区");
+  };
+
+  const handleReset = () => {
+    setState(seedState);
+    setNotice("已恢复示例数据");
+  };
+
   return (
     <main className="app">
       <section className="hero">
-        <p>{project.id} · 源提示词{project.sourceNo} · Port {project.port}</p>
-        <h1>{project.title}</h1>
-        <span>{project.prompt}</span>
+        <p>
+          {project.id} · 源提示词{project.sourceNo} · Port {project.port}
+        </p>
+        <h1>{project.title} · 日志合并台</h1>
+        <span>
+          各棚导出的训放表格式不一，粘贴后先预览再合并：按足环号与放飞时刻识别重复并沿用首次来源；
+          缺距离、天气或归巢时刻的行留在待补区，不进排行；确认后写入有效行。
+          改动距离、天气或归巢报时会重算排行，并在修订记录中保留前后值。
+        </span>
       </section>
 
-      <section className="metrics">
-        {project.metrics.map((metric: string, index: number) => (
-          <article key={metric}>
-            <small>{metric}</small>
-            <strong>{[28, 6, 14, 91][index] ?? 10}</strong>
-          </article>
-        ))}
-      </section>
+      <OverviewBar stats={stats} pendingCount={state.pending.length} />
 
-      <section className="workspace">
-        <aside className="panel">
-          <h2>{project.domain}分类</h2>
-          <div className="chips">
-            {project.filters.map((item: string) => (
-              <button key={item}>{item}</button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="panel form-panel">
-          <div className="heading">
-            <div>
-              <p>专业字段</p>
-              <h2>新增记录</h2>
-            </div>
-            <button className="primary">保存记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
-      </section>
-
-      <section className="panel">
-        <div className="heading">
-          <div>
-            <p>近期记录</p>
-            <h2>工作台摘要</h2>
-          </div>
-          <button>导出CSV</button>
+      {notice && (
+        <div className="notice">
+          <span>{notice}</span>
+          <button className="btn-sm" onClick={() => setNotice("")}>
+            知道了
+          </button>
         </div>
-        <div className="records">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")}>
-              <b>{String(index + 1).padStart(2, "0")}</b>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
+      )}
+
+      <MergeConsole onPreview={handlePreview} onConfirm={handleConfirm} />
+
+      <div className="grid-2">
+        <RankingBoard ranking={ranking} onEdit={handleEdit} />
+        <div className="side-stack">
+          <PendingList
+            pending={state.pending}
+            onComplete={handleCompletePending}
+            onMarkUnreturned={handleMarkUnreturned}
+            onRemove={handleRemovePending}
+          />
+          <UnreturnedPanel records={state.records} />
         </div>
-      </section>
+      </div>
+
+      <BloodlinePanel stats={bloodlines} ranking={ranking} />
+
+      <AuditTrail edits={state.edits} />
+
+      <footer className="foot">
+        <span>
+          在册 {state.records.length} 条 · 待补 {state.pending.length} 条 · 修订 {state.edits.length}{" "}
+          条（数据保存在本机浏览器）
+        </span>
+        <button className="btn-sm" onClick={handleReset}>
+          恢复示例数据
+        </button>
+      </footer>
     </main>
   );
 }
